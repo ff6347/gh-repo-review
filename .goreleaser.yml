@@ -1,0 +1,28 @@
+# ABOUTME: Goreleaser config for building gh extension binaries.
+# ABOUTME: Produces platform-specific binaries with correct naming for gh extension install.
+
+version: 2
+
+builds:
+  - binary: gh-repo-review-{{ .Os }}-{{ .Arch }}
+    no_unique_dist_dir: true
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - format: binary
+
+checksum:
+  disable: true
+
+release:
+  draft: true
