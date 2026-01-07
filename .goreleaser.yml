@@ -4,7 +4,7 @@
 version: 2
 
 builds:
-  - binary: gh-repo-review-{{ .Os }}-{{ .Arch }}
+  - binary: "{{ .ProjectName }}"
     no_unique_dist_dir: true
     env:
       - CGO_ENABLED=0
@@ -20,6 +20,7 @@ builds:
 
 archives:
   - formats: [binary]
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
 
 checksum:
   disable: true
