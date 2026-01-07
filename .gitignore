@@ -1,0 +1,23 @@
+# Binaries
+gh-repo-review
+*.exe
+dist/
+
+# Go
+*.test
+*.out
+coverage.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Air (hot reload)
+tmp/
