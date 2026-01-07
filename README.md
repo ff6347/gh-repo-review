@@ -21,6 +21,18 @@ A TUI tool to review all your GitHub repositories and automate the process of ar
 - [Go 1.21+](https://golang.org/dl/) (for building from source)
 - [GitHub CLI (gh)](https://cli.github.com/) - must be installed and authenticated
 
+## Permissions
+
+The default `gh` authentication works for listing, archiving, and unarchiving repositories.
+
+**To delete repositories**, you need the `delete_repo` scope:
+
+```bash
+gh auth refresh -s delete_repo
+```
+
+This will prompt you to re-authenticate and grant the additional permission.
+
 ## Installation
 
 ### As a gh extension (recommended)
@@ -159,6 +171,8 @@ go test ./...
 .
 ├── main.go                 # Entry point
 ├── internal/
+│   ├── cache/
+│   │   └── cache.go       # Repository list caching
 │   ├── gh/
 │   │   └── client.go      # GitHub API client (via gh CLI)
 │   ├── repo/
@@ -170,6 +184,8 @@ go test ./...
 ├── go.sum
 └── README.md
 ```
+
+Cache is stored at `~/.cache/gh-repo-review/` with a 5-minute TTL. Press `r` to force refresh.
 
 ## Dependencies
 

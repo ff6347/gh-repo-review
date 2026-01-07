@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/user/gh-repo-review/internal/cache"
 	"github.com/user/gh-repo-review/internal/gh"
 	"github.com/user/gh-repo-review/internal/repo"
 )
@@ -61,6 +62,16 @@ type reposLoadedMsg struct {
 	username string
 }
 
+type cacheLoadedMsg struct {
+	repos    []repo.Repo
+	username string
+	fresh    bool
+}
+
+type backgroundRefreshMsg struct {
+	repos []repo.Repo
+}
+
 type errorMsg struct{ err error }
 type archiveCompleteMsg struct{ name string }
 type deleteCompleteMsg struct{ name string }
@@ -92,12 +103,12 @@ func NewModel() Model {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
-		loadRepos,
+		loadReposWithCache,
 	)
 }
 
-// loadRepos fetches repos from GitHub
-func loadRepos() tea.Msg {
+// loadReposWithCache tries cache first, falls back to API
+func loadReposWithCache() tea.Msg {
 	client := gh.NewClient()
 
 	if err := client.CheckAuth(); err != nil {
@@ -109,11 +120,53 @@ func loadRepos() tea.Msg {
 		return errorMsg{err: err}
 	}
 
+	// Try loading from cache
+	repos, fresh, err := cache.Load(username)
+	if err == nil && repos != nil {
+		return cacheLoadedMsg{repos: repos, username: username, fresh: fresh}
+	}
+
+	// No cache, fetch from API
+	repos, err = client.ListRepos()
+	if err != nil {
+		return errorMsg{err: err}
+	}
+
+	// Save to cache
+	_ = cache.Save(username, repos)
+
+	return reposLoadedMsg{repos: repos, username: username}
+}
+
+// refreshRepos fetches fresh data from API (for background refresh)
+func refreshRepos(username string) tea.Cmd {
+	return func() tea.Msg {
+		client := gh.NewClient()
+		repos, err := client.ListRepos()
+		if err != nil {
+			// Silent failure for background refresh
+			return nil
+		}
+		_ = cache.Save(username, repos)
+		return backgroundRefreshMsg{repos: repos}
+	}
+}
+
+// forceRefreshRepos always fetches from API (for manual refresh)
+func forceRefreshRepos() tea.Msg {
+	client := gh.NewClient()
+
+	username, err := client.GetCurrentUser()
+	if err != nil {
+		return errorMsg{err: err}
+	}
+
 	repos, err := client.ListRepos()
 	if err != nil {
 		return errorMsg{err: err}
 	}
 
+	_ = cache.Save(username, repos)
 	return reposLoadedMsg{repos: repos, username: username}
 }
 
@@ -144,6 +197,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.client = gh.NewClient()
 		m.applyFilters()
 		m.message = fmt.Sprintf("Loaded %d repositories", len(m.repos))
+
+	case cacheLoadedMsg:
+		m.loading = false
+		m.repos = msg.repos
+		m.username = msg.username
+		m.client = gh.NewClient()
+		m.applyFilters()
+		if msg.fresh {
+			m.message = fmt.Sprintf("Loaded %d repositories (cached)", len(m.repos))
+		} else {
+			m.message = fmt.Sprintf("Loaded %d repositories (refreshing...)", len(m.repos))
+			cmds = append(cmds, refreshRepos(msg.username))
+		}
+
+	case backgroundRefreshMsg:
+		if msg.repos != nil {
+			// Preserve selection state
+			selectedNames := make(map[string]bool)
+			for _, r := range m.repos {
+				if r.Selected {
+					selectedNames[r.FullName] = true
+				}
+			}
+			m.repos = msg.repos
+			for i := range m.repos {
+				if selectedNames[m.repos[i].FullName] {
+					m.repos[i].Selected = true
+				}
+			}
+			m.applyFilters()
+			m.message = fmt.Sprintf("Refreshed %d repositories", len(m.repos))
+		}
 
 	case errorMsg:
 		m.loading = false
@@ -286,6 +371,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			idx := m.getActualIndex(m.cursor)
 			if idx >= 0 {
 				m.repos[idx].Selected = !m.repos[idx].Selected
+				m.filteredRepos[m.cursor].Selected = m.repos[idx].Selected
 				m.updateSelectedCount()
 			}
 		}
@@ -309,15 +395,26 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.filteredRepos) > 0 {
 			if m.selectedCount > 0 {
 				m.view = ViewConfirmDelete
+			} else {
+				// Delete single repo under cursor
+				idx := m.getActualIndex(m.cursor)
+				if idx >= 0 {
+					m.repos[idx].Selected = true
+					m.updateSelectedCount()
+					m.view = ViewConfirmDelete
+				}
 			}
 		}
 
 	case "A":
 		// Select all visible
-		for _, fr := range m.filteredRepos {
-			idx := m.getActualIndex(m.findFilteredIndex(fr.FullName))
-			if idx >= 0 && !m.repos[idx].IsArchived {
-				m.repos[idx].Selected = true
+		for i := range m.filteredRepos {
+			if !m.filteredRepos[i].IsArchived {
+				m.filteredRepos[i].Selected = true
+				idx := m.getActualIndex(i)
+				if idx >= 0 {
+					m.repos[idx].Selected = true
+				}
 			}
 		}
 		m.updateSelectedCount()
@@ -326,6 +423,9 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Deselect all
 		for i := range m.repos {
 			m.repos[i].Selected = false
+		}
+		for i := range m.filteredRepos {
+			m.filteredRepos[i].Selected = false
 		}
 		m.selectedCount = 0
 
@@ -346,7 +446,7 @@ func (m Model) handleListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		m.loading = true
-		return m, loadRepos
+		return m, forceRefreshRepos
 
 	case "?":
 		m.view = ViewHelp
@@ -677,48 +777,59 @@ func (m Model) viewList() string {
 
 	for i := m.offset; i < end; i++ {
 		r := m.filteredRepos[i]
-		cursor := "  "
+
+		// Cursor
+		var cursor string
 		if i == m.cursor {
-			cursor = cursorStyle.Render("> ")
+			cursor = cursorStyle.Render(">")
+		} else {
+			cursor = " "
 		}
 
 		// Checkbox
-		checkbox := uncheckedStyle.Render("[ ] ")
+		var checkbox string
 		if r.Selected {
-			checkbox = checkboxStyle.Render("[✓] ")
+			checkbox = checkboxStyle.Render("[✓]")
+		} else {
+			checkbox = uncheckedStyle.Render("[ ]")
 		}
 
-		// Name with tags
-		name := repoNameStyle.Render(r.Name)
-		var tags []string
+		// Name (bold for selected row)
+		var name string
+		if i == m.cursor {
+			name = selectedItemStyle.Render(r.Name)
+		} else {
+			name = repoNameStyle.Render(r.Name)
+		}
+
+		// Tags
+		var tagParts []string
 		if r.IsPrivate {
-			tags = append(tags, privateTagStyle.Render("private"))
+			tagParts = append(tagParts, privateTagStyle.Render("private"))
 		}
 		if r.IsArchived {
-			tags = append(tags, archivedTagStyle.Render("archived"))
+			tagParts = append(tagParts, archivedTagStyle.Render("archived"))
 		}
 		if r.IsFork {
-			tags = append(tags, forkTagStyle.Render("fork"))
+			tagParts = append(tagParts, forkTagStyle.Render("fork"))
+		}
+		tags := ""
+		if len(tagParts) > 0 {
+			tags = " " + strings.Join(tagParts, " ")
 		}
 
-		tagStr := strings.Join(tags, "")
-
-		// Stats line
-		stats := fmt.Sprintf("★ %d  ⑂ %d", r.StargazerCount, r.ForkCount)
+		// Stats
+		var statParts []string
+		statParts = append(statParts, fmt.Sprintf("★ %d", r.StargazerCount))
+		statParts = append(statParts, fmt.Sprintf("⑂ %d", r.ForkCount))
 		if r.PrimaryLanguage != "" {
-			langStyle := GetLangStyle(r.PrimaryLanguage)
-			stats += "  " + langStyle.Render(r.PrimaryLanguage)
+			statParts = append(statParts, GetLangStyle(r.PrimaryLanguage).Render(r.PrimaryLanguage))
 		}
-		stats += fmt.Sprintf("  %dd ago", r.DaysSinceUpdate())
+		statParts = append(statParts, fmt.Sprintf("%dd", r.DaysSinceUpdate()))
+		stats := statsStyle.Render(strings.Join(statParts, " "))
 
-		line := fmt.Sprintf("%s%s%s%s\n", cursor, checkbox, name, tagStr)
-		if i == m.cursor {
-			line = selectedItemStyle.Render(line)
-		} else {
-			line = listItemStyle.Render(line)
-		}
-		b.WriteString(line)
-		b.WriteString(listItemStyle.Render(fmt.Sprintf("      %s\n", statsStyle.Render(stats))))
+		// Build line without lipgloss padding (causes issues with ANSI codes)
+		b.WriteString(fmt.Sprintf("  %s %s %s%s  %s\n", cursor, checkbox, name, tags, stats))
 	}
 
 	// Selection count
@@ -744,6 +855,7 @@ func (m Model) viewList() string {
 		helpKeyStyle.Render("f") + " filter",
 		helpKeyStyle.Render("space") + " select",
 		helpKeyStyle.Render("a") + " archive",
+		helpKeyStyle.Render("d") + " delete",
 		helpKeyStyle.Render("o") + " open",
 		helpKeyStyle.Render("?") + " help",
 		helpKeyStyle.Render("q") + " quit",
