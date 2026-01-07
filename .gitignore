@@ -21,3 +21,4 @@ Thumbs.db
 
 # Air (hot reload)
 tmp/
+.claude/settings.local.json
